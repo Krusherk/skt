@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() { return request.auth != null; }
+    function isAdmin() { return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'createdAt'])
+        && (data.keys().size() == 2 || (data.keys().size() == 3 && 'username' in data.keys()))
+        && data.email is string
+        && data.email.size() <= 200
+        && data.createdAt is timestamp
+        && (!('username' in data.keys()) || (data.username is string && data.username.size() <= 100));
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin()) && isValidId(userId);
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && request.auth.uid == userId && isValidId(userId)
+        && isValidUser(incoming())
+        && incoming().createdAt == existing().createdAt;
+    }
+
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId);
+      allow list: if isAdmin();
+    }
+
+    function isValidBag(data) {
+      return data.keys().hasAll(['name', 'description', 'price', 'imageUrl', 'category', 'createdAt'])
+        && data.keys().size() == 6
+        && data.name is string && data.name.size() <= 100
+        && data.description is string && data.description.size() <= 1000
+        && data.category is string && data.category.size() <= 50
+        && data.price is number
+        && data.imageUrl is string && data.imageUrl.size() <= 500
+        && data.createdAt is timestamp;
+    }
+
+    match /bags/{bagId} {
+      allow get: if isValidId(bagId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(bagId) 
+        && isValidBag(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(bagId)
+        && isValidBag(incoming())
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(bagId);
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'bagId', 'price', 'status', 'createdAt'])
+        && data.keys().size() == 5
+        && data.userId is string && data.userId.size() <= 128
+        && data.bagId is string && data.bagId.size() <= 128
+        && data.price is number
+        && data.status is string && data.status.size() <= 20
+        && data.createdAt is timestamp;
+    }
+
+    match /orders/{orderId} {
+      allow get: if isSignedIn() && isValidId(orderId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidId(orderId)
+        && isValidOrder(incoming())
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/bags/$(incoming().bagId));
+      allow update: if isAdmin() && isValidId(orderId)
+        && isValidOrder(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+    }
+  }
+}
