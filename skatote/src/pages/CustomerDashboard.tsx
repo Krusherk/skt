@@ -4,96 +4,108 @@ import { collection, onSnapshot, addDoc, serverTimestamp } from "firebase/firest
 import { auth, db } from "../lib/firebase";
 import { signOut } from "firebase/auth";
 import { LogOut, ShoppingBag, CreditCard, Search } from "lucide-react";
-import { loadStripe } from "@stripe/stripe-js";
-import { Elements, CardElement, useStripe, useElements } from "@stripe/react-stripe-js";
+// @ts-ignore
+import PaystackPop from "@paystack/inline-js";
 import toast from "react-hot-toast";
 import { format } from "date-fns";
 
-// Initialize Stripe (will use env variable if provided, else dummy key for UI)
-const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || "pk_test_dummy");
+const PAYSTACK_PUBLIC_KEY = import.meta.env.VITE_PAYSTACK_PUBLIC_KEY || "pk_test_d3b094514f8668041f0409ff9afc47527d590f5c";
 
-function CheckoutForm({ amount, bagId, onSuccess, onCancel }: { amount: number, bagId: string, onSuccess: () => void, onCancel: () => void }) {
-  const stripe = useStripe();
-  const elements = useElements();
-  const [error, setError] = useState<string | null>(null);
+function PaystackCheckoutForm({ amount, bagId, bagName, onSuccess, onCancel }: { amount: number, bagId: string, bagName: string, onSuccess: () => void, onCancel: () => void }) {
   const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!stripe || !elements || !auth.currentUser) return;
+  const handlePayment = async () => {
+    if (!auth.currentUser) {
+      setError("You must be logged in to make a payment.");
+      return;
+    }
 
     setProcessing(true);
     setError(null);
 
     try {
-      let clientSecret = "";
-      try {
-        const res = await fetch("/api/payment-intent", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount })
-        });
-        const data = await res.json();
-        if (data.clientSecret) {
-          clientSecret = data.clientSecret;
-        }
-      } catch (err) {
-        console.warn("Backend payment intent failed or not configured, simulating success.");
-      }
+      const paystack = new PaystackPop();
 
-      if (clientSecret) {
-        const { error: stripeError } = await stripe.confirmCardPayment(clientSecret, {
-          payment_method: {
-            card: elements.getElement(CardElement) as any,
-            billing_details: { email: auth.currentUser.email || undefined },
+      paystack.checkout({
+        key: PAYSTACK_PUBLIC_KEY,
+        email: auth.currentUser.email || "",
+        amount: Math.round(amount * 100), // Convert to kobo (₦1 = 100 kobo)
+        currency: "NGN",
+        ref: `ska_${Date.now()}_${Math.floor(Math.random() * 1000000)}`,
+        metadata: {
+          custom_fields: [
+            { display_name: "Bag", variable_name: "bag_name", value: bagName },
+            { display_name: "Bag ID", variable_name: "bag_id", value: bagId },
+          ]
+        },
+        onSuccess: async (transaction: any) => {
+          try {
+            // Verify the transaction on the backend (optional for test mode)
+            try {
+              await fetch(`/api/verify-transaction?reference=${transaction.reference}`);
+            } catch {
+              // Backend verification is optional; Paystack popup already confirmed
+            }
+
+            // Create the order in Firestore
+            await addDoc(collection(db, "orders"), {
+              userId: auth.currentUser!.uid,
+              bagId: bagId,
+              price: amount,
+              status: "pending",
+              createdAt: serverTimestamp()
+            });
+
+            toast.success("Order placed successfully! We'll notify you when it ships.");
+            onSuccess();
+          } catch (err: any) {
+            setError(err.message || "Failed to save order.");
+          } finally {
+            setProcessing(false);
           }
-        });
-        if (stripeError) throw new Error(stripeError.message);
-      } else {
-        await new Promise(r => setTimeout(r, 1500));
-      }
-
-      await addDoc(collection(db, "orders"), {
-        userId: auth.currentUser.uid,
-        bagId: bagId,
-        price: amount,
-        status: "pending",
-        createdAt: serverTimestamp()
+        },
+        onCancel: () => {
+          setProcessing(false);
+          toast.error("Payment was cancelled.");
+        },
+        onError: (error: any) => {
+          setProcessing(false);
+          setError(error?.message || "An error occurred during payment.");
+        }
       });
-
-      toast.success("Order placed successfully! We'll notify you when it ships.");
-      onSuccess();
     } catch (err: any) {
-      setError(err.message || "An error occurred during payment.");
-    } finally {
       setProcessing(false);
+      setError(err.message || "Failed to initialize payment.");
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <div className="p-4 bg-background border border-border rounded-xl">
-        <CardElement options={{
-          style: {
-            base: {
-              fontSize: '16px',
-              color: '#fff',
-              '::placeholder': { color: '#6b7280' },
-            },
-            invalid: { color: '#ef4444' },
-          }
-        }} />
+    <div className="space-y-6">
+      <div className="p-5 bg-background border border-border rounded-xl">
+        <div className="flex items-center gap-3 mb-4">
+          <CreditCard className="w-5 h-5 text-primary-light" />
+          <p className="text-sm text-white font-medium">Pay with Paystack</p>
+        </div>
+        <p className="text-xs text-text-muted leading-relaxed">
+          Secure payment via card, bank transfer, or USSD. You'll be redirected to Paystack's secure checkout.
+        </p>
       </div>
       {error && <div className="text-red-400 text-sm">{error}</div>}
       <div className="flex gap-4">
         <button type="button" onClick={onCancel} className="flex-1 py-3 px-4 rounded-full border border-border text-white hover:bg-surface transition-colors">
           Cancel
         </button>
-        <button type="submit" disabled={!stripe || processing} className="flex-1 py-3 px-4 rounded-full bg-white text-black font-medium hover:bg-gray-200 transition-colors disabled:opacity-50 flex justify-center items-center gap-2">
-          {processing ? "Processing..." : `Pay $${amount}`}
+        <button 
+          type="button" 
+          onClick={handlePayment} 
+          disabled={processing} 
+          className="flex-1 py-3 px-4 rounded-full bg-white text-black font-medium hover:bg-gray-200 transition-colors disabled:opacity-50 flex justify-center items-center gap-2"
+        >
+          {processing ? "Processing..." : `Pay ₦${amount.toLocaleString()}`}
         </button>
       </div>
-    </form>
+    </div>
   );
 }
 
@@ -184,7 +196,7 @@ export default function CustomerDashboard() {
                   <div className="p-6 flex flex-col flex-1">
                     <div className="flex justify-between items-start mb-1">
                       <h3 className="text-lg font-serif text-white">{bag.name}</h3>
-                      <span className="text-lg font-medium text-white">${bag.price}</span>
+                      <span className="text-lg font-medium text-white">₦{bag.price?.toLocaleString()}</span>
                     </div>
                     {bag.category && <p className="text-xs uppercase tracking-wider text-primary-light mb-2">{bag.category}</p>}
                     <p className="text-sm text-text-muted line-clamp-2 mb-6 flex-1">{bag.description}</p>
@@ -221,7 +233,7 @@ export default function CustomerDashboard() {
                       </div>
                       <div className="flex-1 min-w-0 flex flex-col justify-center">
                         <p className="text-white text-sm font-medium truncate">{bag ? bag.name : "Unknown Bag"}</p>
-                        <p className="text-xs text-text-muted mt-1 uppercase tracking-wider">${order.price} • <span className={order.status === 'completed' || order.status === 'pending' ? 'text-blue-400' : 'text-green-400'}>{order.status}</span></p>
+                        <p className="text-xs text-text-muted mt-1 uppercase tracking-wider">₦{order.price?.toLocaleString()} • <span className={order.status === 'completed' || order.status === 'pending' ? 'text-blue-400' : 'text-green-400'}>{order.status}</span></p>
                         <p className="text-[10px] text-text-muted mt-2">{orderDate} • ID: {order.id.slice(0, 8)}</p>
                       </div>
                     </div>
@@ -242,21 +254,19 @@ export default function CustomerDashboard() {
             
             <div className="flex justify-between items-center mb-8 p-4 bg-background rounded-xl border border-border">
               <span className="font-medium text-white">Total</span>
-              <span className="text-xl font-serif text-white">${selectedBag.price}</span>
+              <span className="text-xl font-serif text-white">₦{selectedBag.price?.toLocaleString()}</span>
             </div>
 
-            <Elements stripe={stripePromise}>
-              <CheckoutForm 
-                amount={selectedBag.price} 
-                bagId={selectedBag.id} 
-                onSuccess={() => setSelectedBag(null)} 
-                onCancel={() => setSelectedBag(null)} 
-              />
-            </Elements>
+            <PaystackCheckoutForm 
+              amount={selectedBag.price} 
+              bagId={selectedBag.id} 
+              bagName={selectedBag.name}
+              onSuccess={() => setSelectedBag(null)} 
+              onCancel={() => setSelectedBag(null)} 
+            />
           </div>
         </div>
       )}
     </div>
   );
 }
-

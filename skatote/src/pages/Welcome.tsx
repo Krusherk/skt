@@ -64,7 +64,7 @@ export default function Welcome() {
           <div className="flex flex-col items-center justify-center p-4">
             <ShieldCheck className="w-8 h-8 text-primary-light mb-4" />
             <h3 className="font-serif text-lg mb-2">Secure Payments</h3>
-            <p className="text-sm text-text-muted">Encrypted processing via Stripe</p>
+            <p className="text-sm text-text-muted">Encrypted processing via Paystack</p>
           </div>
           <div className="flex flex-col items-center justify-center p-4">
             <Gem className="w-8 h-8 text-primary-light mb-4" />
